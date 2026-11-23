@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>무량 · 無量 바둑</title>
+  <meta name="description" content="무량(無量) — 방을 만들고, 들어가고, 관전하고, 기보를 남기는 온라인 바둑.">
+  <meta name="theme-color" content="#0e0f10">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230e0f10'/%3E%3Ccircle cx='26' cy='28' r='15' fill='%23f3efe4'/%3E%3Ccircle cx='40' cy='38' r='15' fill='%23111' stroke='%23c9a55f' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700;900&display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="./style.css?v=1">
+  <script type="importmap">{"imports":{"trystero":"https://cdn.jsdelivr.net/npm/trystero@0.26.0/+esm"}}</script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#/" aria-label="무량 첫 화면">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+      <span class="brand-text"><b>無量</b><small>MURYANG · 바둑</small></span>
+    </a>
+    <nav class="nav" aria-label="주 메뉴">
+      <a href="#/" data-nav="home">대국실</a>
+      <a href="#/watch" data-nav="watch">관전</a>
+      <a href="#/kibo" data-nav="kibo">기보실</a>
+      <a href="#/profile" data-nav="profile">프로필</a>
+    </nav>
+    <div class="top-right">
+      <span class="net" id="net" title="실시간 연결 상태"><i></i><span>연결 중</span></span>
+      <div id="me-chip"></div>
+    </div>
+  </header>
+  <main id="view" tabindex="-1"></main>
+  <footer class="foot">
+    <span>無量 — 바둑의 깊이는 헤아릴 수 없다</span>
+    <span class="foot-r">계정·기보는 이 기기 브라우저에 저장됩니다 · 대국은 접속한 사람끼리 직접 연결됩니다</span>
+  </footer>
+  <div id="toasts" aria-live="polite"></div>
+  <dialog id="modal"><form method="dialog" class="modal-in" id="modal-in"></form></dialog>
+  <script type="module" src="./src/app.js?v=1"></script>
+</body>
+</html>
