@@ -578,7 +578,7 @@ function kiboView(tab) {
   view.innerHTML = `<section class="page-h"><p class="eyebrow">棋譜 · RECORDS</p><h1>기보실</h1><p class="lead">끝난 대국은 저절로 이곳에 남습니다. 공개하면 접속한 모두가 볼 수 있고, SGF로 내려받을 수 있습니다.</p></section>
   <section class="panel"><div class="panel-h kibo-h"><div class="seg" id="k-tabs"><a href="#/kibo?tab=mine" data-t="mine">내 기보</a><a href="#/kibo?tab=pub" data-t="pub">공개 기보</a><a href="#/kibo?tab=famous" data-t="famous">명국</a></div>
     <div class="k-tools"><input id="k-q" type="search" placeholder="기사 이름 · 제목 검색" value="${esc(kiboQ)}" aria-label="기보 검색"><label class="btn line sm file-btn">SGF 불러오기<input type="file" id="k-file" accept=".sgf,text/plain" hidden></label></div></div>
-    <div id="k-list" class="k-list"></div></section>`;
+    <div id="k-stats"></div><div id="k-list" class="k-list"></div></section>`;
   $$("#k-tabs a").forEach(a => a.classList.toggle("on", a.dataset.t === kiboTab));
   $("#k-q").oninput = e => { kiboQ = e.target.value; renderKiboList(); };
   $("#k-file").onchange = async e => { const f = e.target.files[0]; if (!f) return; if (f.size > 200000) return toast("파일이 너무 큽니다."); const r = parseSGF(await f.text()); if (!r.moves.length || !fromMoves(r.size, r.moves)) return toast("읽을 수 없는 SGF입니다 (주 수순만 지원)."); const rec = { id: "sgf-" + rid8(), size: r.size, komi: r.komi, m: packMoves(r.moves), pb: r.pb.slice(0, 40), pw: r.pw.slice(0, 40), result: r.result.slice(0, 40), title: (r.title || f.name.replace(/\.sgf$/i, "")).slice(0, 40), date: now(), mine: 0, imported: 1, owner: me ? me.key : undefined, pub: 0 }; games.unshift(rec); recAdd(rec); toast(cloud && !me ? "기보를 불러왔습니다. 로그인하면 사이트에 저장됩니다." : "기보를 불러왔습니다."); location.hash = `#/kibo/mine/${encodeURIComponent(rec.id)}`; };
@@ -591,7 +591,29 @@ function kiboRows() {
   if (kiboTab === "pub") return pubs.filter(hit).map(r => ({ ...r, src: "pub" }));
   return myGames().filter(hit).map(r => ({ ...r, src: "mine" }));
 }
+// 내 기보 전적: 총 판수 · 승패 · 승률 · 최근 흐름 · 월별
+let statKind = "all";
+function renderKiboStats() {
+  const box = $("#k-stats"); if (!box) return; if (kiboTab !== "mine") { box.innerHTML = ""; return; }
+  const all = myGames().filter(g => g.mine && g.myColor), list = all.filter(g => statKind === "all" || (statKind === "ai" ? g.ai : !g.ai)).sort((a, b) => (b.date || 0) - (a.date || 0));
+  if (!all.length) { box.innerHTML = ""; return; }
+  const W = g => g.win === g.myColor ? 1 : g.win ? -1 : 0, cnt = a => { const w = a.filter(g => W(g) > 0).length, l = a.filter(g => W(g) < 0).length; return { n: a.length, w, l, d: a.length - w - l, rate: w + l ? Math.round(w / (w + l) * 100) : 0 }; };
+  const t = cnt(list), recent = list.slice(0, 20);
+  let streak = 0, sk = 0; for (const g of list) { const v = W(g); if (!v) break; if (!sk) sk = v; if (v !== sk) break; streak++; }
+  const months = new Map(); for (const g of list) { const d = new Date(g.date || 0), k = `${d.getFullYear()}.${z2(d.getMonth() + 1)}`; if (!months.has(k)) months.set(k, []); months.get(k).push(g); }
+  const mrows = [...months.entries()].slice(0, 12), maxN = Math.max(1, ...mrows.map(([, a]) => a.length));
+  const thisM = (() => { const d = new Date(); return `${d.getFullYear()}.${z2(d.getMonth() + 1)}`; })(), tm = cnt(months.get(thisM) || []);
+  box.innerHTML = `<div class="ks">
+    <div class="ks-top"><div class="seg ks-kind">${[["all", "전체"], ["human", "사람과"], ["ai", "AI와"]].map(([k, l]) => `<button type="button" data-k="${k}" class="${statKind === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      ${streak >= 2 ? `<span class="ks-streak ${sk > 0 ? "w" : "l"}">${streak}${sk > 0 ? "연승" : "연패"} 중</span>` : ""}</div>
+    <div class="ks-nums"><div><b>${t.n}</b><span>총 판수</span></div><div><b>${t.w}</b><span>승</span></div><div><b>${t.l}</b><span>패</span></div><div class="rate"><b>${t.rate}%</b><span>승률</span><i style="--p:${t.rate}%"></i></div><div><b>${tm.n}</b><span>이번 달 판수</span></div><div><b>${tm.w + tm.l ? tm.rate + "%" : "—"}</b><span>이번 달 승률</span></div></div>
+    ${recent.length ? `<div class="ks-form"><span class="ks-lbl">최근 ${recent.length}판 <small>(왼쪽이 최근)</small></span><div>${recent.map(g => { const v = W(g); return `<a href="#/kibo/mine/${encodeURIComponent(g.id)}" class="res ${v > 0 ? "w" : v < 0 ? "l" : "d"}" title="${esc(fmtDay(g.date))} · ${esc(g.myColor === 1 ? g.pw : g.pb)} · ${esc(g.result || "")}">${v > 0 ? "승" : v < 0 ? "패" : "무"}</a>`; }).join("")}</div></div>` : ""}
+    ${mrows.length ? `<div class="ks-month"><span class="ks-lbl">월별</span><table><thead><tr><th>달</th><th>판수</th><th>승</th><th>패</th><th>승률</th><th class="bar-h"></th></tr></thead><tbody>${mrows.map(([k, a]) => { const c = cnt(a); return `<tr><td>${k}</td><td>${c.n}</td><td class="w">${c.w}</td><td class="l">${c.l}</td><td><b>${c.w + c.l ? c.rate + "%" : "—"}</b></td><td class="bar"><span style="width:${a.length / maxN * 100}%"><i style="width:${c.n ? c.w / c.n * 100 : 0}%"></i></span></td></tr>`; }).join("")}</tbody></table></div>` : `<p class="muted small">이 분류의 대국이 아직 없습니다.</p>`}
+  </div>`;
+  $$(".ks-kind button", box).forEach(b => b.onclick = () => { statKind = b.dataset.k; renderKiboStats(); });
+}
 function renderKiboList() {
+  renderKiboStats();
   const box = $("#k-list"); if (!box) return; const rows = kiboRows();
   if (!rows.length) { box.innerHTML = `<div class="empty"><p>${kiboTab === "mine" ? "아직 저장된 기보가 없습니다." : kiboTab === "pub" ? "아직 공개된 기보가 없습니다." : "찾는 기보가 없습니다."}</p><p class="muted">${kiboTab === "mine" ? "대국을 마치면 기보가 자동으로 저장됩니다. SGF 파일을 불러올 수도 있어요." : kiboTab === "pub" ? "내 기보에서 「공개하기」를 누르면 여기에 올라갑니다. 접속한 사람들끼리 서로 나눠 가집니다." : ""}</p></div>`; return; }
   let lastCat = "";
@@ -599,7 +621,7 @@ function renderKiboList() {
     return catH + `<a class="krow" href="#/kibo/${r.src}/${encodeURIComponent(r.id)}"><span class="k-mini"><canvas data-k="${esc(r.id)}"></canvas></span>
     <span class="k-main"><b>${esc(r.title || `${r.pb} vs ${r.pw}`)}</b><small><span class="dot b"></span>${esc(r.pb)}${r.br ? ` ${esc(r.br)}` : ""} <span class="vs">vs</span> <span class="dot w"></span>${esc(r.pw)}${r.wr ? ` ${esc(r.wr)}` : ""}</small></span>
     <span class="k-res">${esc(r.result || "")}<small>${r.size}줄 · ${n}수</small></span>
-    <span class="k-date">${r.src === "famous" ? esc(r.date || "") : fmtDay(r.date)}${r.src === "famous" ? "" : r.src === "pub" ? `<small>@${esc(r.by)} 공개</small>` : r.pub ? `<small class="gold-t">공개됨</small>` : r.ai ? `<small>AI 대국</small>` : r.mine ? `<small>${r.win === r.myColor ? "승" : "패"}</small>` : r.imported ? `<small>불러옴</small>` : `<small>관전</small>`}</span></a>`; }).join("");
+    <span class="k-date">${r.src === "famous" ? esc(r.date || "") : fmtDay(r.date)}${r.src === "famous" ? "" : r.src === "pub" ? `<small>@${esc(r.by)} 공개</small>` : r.mine && r.myColor ? `<small class="k-tags">${r.win === r.myColor ? `<span class="res w">승</span>` : r.win ? `<span class="res l">패</span>` : `<span class="res d">무</span>`}${r.ai ? `<em>AI</em>` : ""}${r.pub ? `<em class="gold-t">공개</em>` : ""}</small>` : r.pub ? `<small class="gold-t">공개됨</small>` : r.imported ? `<small>불러옴</small>` : `<small>관전</small>`}</span></a>`; }).join("");
   const io = new IntersectionObserver(es => es.forEach(e => { if (!e.isIntersecting) return; io.unobserve(e.target); const r = rows.find(x => x.id === e.target.dataset.k); if (!r) return; const b = fromMoves(r.size, unpackMoves(r.m)); if (b) paintBoard(e.target, b, { mini: true, noLast: true }); }), { rootMargin: "200px" });
   $$("canvas[data-k]", box).forEach(c => io.observe(c));
 }
