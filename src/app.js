@@ -2,6 +2,8 @@
 import { Board, fromMoves, ownership, finalScore, PASS, BLACK, WHITE } from "./engine.js";
 import { paintBoard, boardPoint, COORD, packMoves, unpackMoves, toSGF, parseSGF } from "./board.js";
 import { FAMOUS } from "./famous.js";
+import { firebaseConfig } from "./firebase-config.js?v=3";
+import { initCloud } from "./cloud.js?v=3";
 
 // =====================================================================
 // 공용 도구
@@ -54,13 +56,16 @@ function sfx(kind = "stone") {
 // 계정 (이 기기 브라우저에 저장 · 비밀번호는 해시로만 보관)
 // =====================================================================
 let accounts = load(LS.acc, []); if (!Array.isArray(accounts)) accounts = [];
+let cloud = null; // Firebase 연결 (firebase-config.js가 채워져 있으면)
 let me = accounts.find(a => a.key === load(LS.ses, null)) || null;
 const saveAccounts = () => save(LS.acc, accounts);
-function setMe(a) { me = a; save(LS.ses, a ? a.key : null); renderChip(); sendPres(); }
+const fromCloud = p => p ? { ...p, rec: { w: p.w | 0, l: p.l | 0 }, bio: p.bio || "", av: okAv(p.av) ? p.av : { k: "stone", c: "black" } } : null;
+const cloudErr = e => toast((e && e.message) || "사이트에 저장하지 못했습니다.", "warn");
+function setMe(a) { me = a; if (!cloud) save(LS.ses, a ? a.key : null); renderChip(); sendPres(); }
 const rankOf = u => RANKS[u && Number.isInteger(u.rank) ? u.rank : 0] || "입문";
 const pubU = () => me ? { key: me.key, id: me.id, nick: me.nick, rank: me.rank, bio: me.bio || "", av: me.av, w: me.rec.w, l: me.rec.l } : null;
 function okU(u) {
-  return !!u && typeof u.key === "string" && u.key.length <= 24 && typeof u.id === "string" && (ID_RE.test(u.id) || u.id === "muryang_ai") && nickOK(u.nick) && Number.isInteger(u.rank) && u.rank >= 0 && u.rank < RANKS.length &&
+  return !!u && typeof u.key === "string" && u.key.length <= 40 && typeof u.id === "string" && (ID_RE.test(u.id) || u.id === "muryang_ai") && nickOK(u.nick) && Number.isInteger(u.rank) && u.rank >= 0 && u.rank < RANKS.length &&
     typeof (u.bio ?? "") === "string" && (u.bio || "").length <= 80 && Number.isInteger(u.w ?? 0) && Number.isInteger(u.l ?? 0) && okAv(u.av);
 }
 const okAv = a => !!a && ((a.k === "stone" && STONES[a.c]) || (a.k === "img" && typeof a.src === "string" && a.src.startsWith("data:image/") && a.src.length < 24000));
@@ -78,7 +83,11 @@ const AI_U = lv => ({ key: "ai", id: "muryang_ai", nick: "무량 AI", rank: [8, 
 let games = load(LS.games, []); if (!Array.isArray(games)) games = [];
 let pubs = load(LS.pub, []); if (!Array.isArray(pubs)) pubs = [];
 const saveGames = () => save(LS.games, games.slice(0, 400));
-const savePubs = () => save(LS.pub, pubs.slice(0, 300));
+const savePubs = () => { if (!cloud) save(LS.pub, pubs.slice(0, 300)); };
+const pubIdOf = r => cloud && me ? `${r.id}-${me.key.slice(0, 8)}` : r.id;
+const recAdd = r => { if (cloud) { if (me) cloud.addRec(me.key, r).catch(cloudErr); } else saveGames(); };
+const recUpd = (r, patch) => { Object.assign(r, patch); if (cloud) { if (me) cloud.updRec(me.key, r.id, patch).catch(cloudErr); } else saveGames(); };
+const recDel = r => { games = games.filter(g => g !== r); if (cloud) { if (me) cloud.delRec(me.key, r.id).catch(cloudErr); } else saveGames(); };
 const okRec = r => !!r && typeof r.id === "string" && r.id.length <= 48 && [9, 13, 19].includes(r.size) && typeof r.m === "string" && r.m.length <= 1800 && /^([a-s]{2}|--)*$/.test(r.m) &&
   ["pb", "pw", "br", "wr", "result", "title", "by", "byNick"].every(k => r[k] === undefined || (typeof r[k] === "string" && r[k].length <= 80)) && typeof (r.komi ?? 6.5) === "number";
 const myGames = () => me ? games.filter(g => g.owner === me.key) : games.filter(g => !g.owner);
@@ -109,7 +118,7 @@ async function connect() {
   });
   A.gm.on((d, { peerId }) => { if (!d || typeof d !== "object") return; if (H && d.rid === H.rid && d.t !== "st") hostHandle(d, peerId); else clientHandle(d, peerId); });
   A.kb.on((d, { peerId }) => {
-    if (!d) return;
+    if (!d || cloud) return;
     if (d.t === "pub" && okRec(d.r) && typeof d.r.bk === "string") { if (addPub(d.r)) { savePubs(); refreshLive(); } }
     else if (d.t === "publ" && Array.isArray(d.list)) { let n = 0; for (const r of d.list.slice(0, 80)) if (okRec(r) && typeof r.bk === "string" && addPub(r)) n++; if (n) { savePubs(); refreshLive(); } }
     else if (d.t === "unpub" && typeof d.id === "string" && typeof d.bk === "string") { const i = pubs.findIndex(p => p.id === d.id && p.bk === d.bk); if (i >= 0) { pubs.splice(i, 1); savePubs(); refreshLive(); } }
@@ -119,7 +128,7 @@ async function connect() {
 const where = () => H ? "room:" + H.rid : cur ? "room:" + cur.rid : location.hash.slice(1, 20);
 function sendPres(to) { A.pres.send({ u: pubU(), at: where() }, to); }
 function addPub(r) { const o = pubs.findIndex(p => p.id === r.id); if (o >= 0) return false; pubs.unshift({ id: r.id, size: r.size, komi: r.komi ?? 6.5, m: r.m, pb: r.pb, pw: r.pw, br: r.br, wr: r.wr, result: r.result, title: r.title, date: typeof r.date === "number" ? r.date : now(), by: r.by, byNick: r.byNick, bk: r.bk, ts: typeof r.ts === "number" ? r.ts : now() }); pubs.sort((a, b) => b.ts - a.ts); if (pubs.length > 300) pubs.length = 300; return true; }
-function sendPubList(to) { if (pubs.length) A.kb.send({ t: "publ", list: pubs.slice(0, 60) }, to); }
+function sendPubList(to) { if (!cloud && pubs.length) A.kb.send({ t: "publ", list: pubs.slice(0, 60) }, to); }
 function pushLobbyChat(c) { lobbyChat.push(c); if (lobbyChat.length > 80) lobbyChat.shift(); const box = $("#lobby-chat .chat-log"); if (box) renderLobbyChat(); }
 
 // =====================================================================
@@ -153,7 +162,7 @@ function closeRoom(silent) {
 const memberIds = () => { if (!H) return []; const s = new Set(H.specs.map(x => x.pid)); for (const c of [1, 2]) if (H.p[c] && H.p[c].pid !== selfId && H.p[c].pid !== "ai") s.add(H.p[c].pid); for (const x of H.pend) s.add(x.pid); s.delete(selfId); return [...s]; };
 function stateOf() {
   return { rid: H.rid, title: H.title, host: selfId, size: H.size, komi: H.komi, tc: H.tc, undo: H.undo, priv: H.priv, ai: H.ai, auto: H.auto, status: H.status, p: H.p, specs: H.specs, pend: H.pend.map(x => ({ pid: x.pid, u: x.u })),
-    chat: H.chat.slice(-60), m: packMoves(H.moves), req: H.req, result: H.result, win: H.win, score: H.score, cl: H.cl, el: H.t0 ? now() - H.t0 : 0, gid: H.gid, rev: ++H.rev };
+    chat: H.chat.slice(-60), m: packMoves(H.moves), req: H.req, closeAt: H.closeAt || 0, result: H.result, win: H.win, score: H.score, cl: H.cl, el: H.t0 ? now() - H.t0 : 0, gid: H.gid, rev: ++H.rev };
 }
 let pushT = 0;
 function pushState() {
@@ -163,7 +172,7 @@ function pushState() {
 function sysChat(text) { if (!H) return; H.chat.push({ sys: 1, text, ts: now() }); if (H.chat.length > 120) H.chat.splice(0, H.chat.length - 120); }
 function colorOf(pid) { if (!H) return 0; return H.p[1] && H.p[1].pid === pid ? 1 : H.p[2] && H.p[2].pid === pid ? 2 : 0; }
 function startGame() {
-  H.status = "play"; H.moves = []; H.b = new Board(H.size); H.req = null; H.result = ""; H.win = 0; H.score = null; H.round++; H.gid = `${H.rid}-${H.round}-${rid8().slice(0, 4)}`;
+  H.status = "play"; H.closeAt = 0; H.moves = []; H.b = new Board(H.size); H.req = null; H.result = ""; H.win = 0; H.score = null; H.round++; H.gid = `${H.rid}-${H.round}-${rid8().slice(0, 4)}`;
   H.cl = H.tc && H.tc.m ? { 1: { m: H.tc.m * 1000, n: H.tc.n }, 2: { m: H.tc.m * 1000, n: H.tc.n } } : null; H.t0 = now(); H.started = now();
   sysChat(`대국 시작 — 흑 ${H.p[1].u.nick} · 백 ${H.p[2].u.nick}`); aiMaybe();
   if (!H.ai && !location.hash.startsWith("#/room/" + H.rid)) { sfx("ding"); toast("상대가 앉아 대국이 시작되었습니다!"); setTimeout(() => { if (H) location.hash = "#/room/" + H.rid; }, 300); }
@@ -175,7 +184,12 @@ function clockOf(cl, tc, side, el) {
   if (used >= n) return { m: 0, n: 0, lost: true, byo: true, left: 0 };
   return { m: 0, n: n - used, byo: true, left: b - (over % b) };
 }
-function endGame(result, win, score = null) { if (!H) return; H.status = "end"; H.result = result; H.win = win; H.score = score; H.req = null; H.t0 = 0; sysChat(`대국 종료 — ${result}`); pushState(); }
+const AUTO_CLOSE = 5 * 60000;
+function endGame(result, win, score = null) {
+  if (!H) return; H.status = "end"; H.result = result; H.win = win; H.score = score; H.req = null; H.t0 = 0; H.closeAt = now() + AUTO_CLOSE;
+  sysChat(`대국 종료 — ${result} · 이 방은 5분 뒤 자동으로 닫힙니다.`); pushState();
+  const gid = H.gid, rid = H.rid; setTimeout(() => { if (H && H.rid === rid && H.gid === gid && H.status !== "play" && H.status !== "count") { const here = location.hash.startsWith("#/room/" + rid); closeRoom(true); toast("대국이 끝나고 5분이 지나 방을 닫았습니다."); if (here) { cur = null; location.hash = "#/"; } } }, AUTO_CLOSE + 200);
+}
 function playMove(col, mv) { // 방장 쪽: 착수 적용
   if (!H || H.status !== "play" || H.b.turn !== col) return false;
   const p = mv ? H.b.pos(mv[0], mv[1]) : PASS; if (mv && !(mv[0] >= 0 && mv[1] >= 0 && mv[0] < H.size && mv[1] < H.size)) return false;
@@ -313,8 +327,8 @@ function archiveGame(S, moves) {
   const mc = myColorIn(S), p1 = S.p[1] && S.p[1].u, p2 = S.p[2] && S.p[2].u;
   if (games.some(g => g.id === S.gid && g.owner === (me ? me.key : undefined))) return;
   const rec = { id: S.gid, size: S.size, komi: S.komi, m: packMoves(moves), pb: p1 ? p1.nick : "흑", pw: p2 ? p2.nick : "백", pbId: p1 ? p1.id : "", pwId: p2 ? p2.id : "", br: p1 ? rankOf(p1) : "", wr: p2 ? rankOf(p2) : "", result: S.result, title: S.title, date: now(), mine: mc ? 1 : 0, myColor: mc, ai: S.ai ? 1 : 0, win: S.win, owner: me ? me.key : undefined, pub: 0 };
-  games.unshift(rec); saveGames();
-  if (mc && me && !S.ai) { if (S.win === mc) me.rec.w++; else me.rec.l++; saveAccounts(); sendPres(); }
+  games.unshift(rec); recAdd(rec);
+  if (mc && me && !S.ai) { if (S.win === mc) me.rec.w++; else me.rec.l++; if (cloud) cloud.addStat(me.key, S.win === mc).catch(cloudErr); else saveAccounts(); sendPres(); }
   toast(mc ? `대국이 끝났습니다 — ${S.result}. 기보실에 저장했습니다.` : `관전한 대국의 기보를 기보실에 저장했습니다.`);
 }
 
@@ -331,7 +345,7 @@ function renderChip() {
   document.addEventListener("click", () => { m.hidden = true; }, { once: true });
   $("#chip-out").onclick = () => logout();
 }
-async function logout() { if (H && (H.status === "play")) { if (!(await ask("로그아웃", "진행 중인 대국은 기권으로 처리됩니다.", "로그아웃", true))) return; } if (H) closeRoom(true); if (cur) leaveRoom(true); setMe(null); toast("로그아웃했습니다."); location.hash = "#/"; }
+async function logout() { if (H && (H.status === "play")) { if (!(await ask("로그아웃", "진행 중인 대국은 기권으로 처리됩니다.", "로그아웃", true))) return; } if (H) closeRoom(true); if (cur) leaveRoom(true); if (cloud) { await cloud.logout().catch(() => {}); games = []; } setMe(null); toast("로그아웃했습니다."); location.hash = "#/"; }
 
 let page = "", liveT = 0, clockT = 0;
 function refreshLive() { clearTimeout(liveT); liveT = setTimeout(() => { if (page === "home") { renderRooms(); renderOnline(); renderStats(); } else if (page === "watch") renderWatch(); else if (page === "kibo" && kiboTab === "pub") renderKiboList(); else if (page === "user") userView(userId); }, 80); }
@@ -364,7 +378,7 @@ function homeView() {
   <section class="hero">
     <div class="hero-txt">
       <p class="eyebrow">無量 · MURYANG BADUK</p>
-      <h1>한 판의 깊이,<br><em>헤아릴 수 없이.</em></h1>
+      <h1>흑과 백이 그리는<br><em>무한의 세계.</em></h1>
       <p class="lead">방을 열고, 들어가고, 지켜보세요. 끝난 대국은 기보로 남습니다.</p>
       <div class="hero-act"><button class="btn gold lg" id="b-create">방 만들기</button><button class="btn line lg" id="b-quick">빠른 대국</button><button class="btn ghost lg" id="b-ai">무량 AI와 한 판</button></div>
     </div>
@@ -504,7 +518,7 @@ function renderRoom() {
       <div class="pc-bot"><span>따낸 돌 <b>${b.cap[c]}</b></span><span class="clock" id="clk-${c}">${S.cl ? "" : S.tc && S.tc.m ? "⏱ " + TC_LABEL(S.tc) : "시간 무제한"}</span></div>${S.status === "end" && S.win === c ? `<span class="won-tag">승</span>` : ""}`
       : `<div class="pc-top"><span class="stone-ic ${c === 1 ? "b" : "w"}"></span><div class="pc-name"><b class="muted">빈 자리</b><small>${colName(c)}으로 둘 사람을 기다립니다</small></div></div>`; }
   const moveN = cur.moves.length, last = moveN ? cur.moves[moveN - 1] : undefined;
-  $("#r-turn").innerHTML = S.status === "wait" ? `상대를 기다리는 중입니다` : S.status === "count" ? `계가 중입니다…` : S.status === "end" ? `<b>${esc(S.result)}</b> · 총 ${moveN}수` : `<b>${colName(b.turn)} 차례</b> · ${moveN + 1}수째${last !== undefined ? ` · 직전 ${COORD(last, S.size)}` : ""}${mc ? (b.turn === mc ? ` · <span class="gold-t">내 차례</span>` : "") : ` · 관전 중`}`;
+  $("#r-turn").innerHTML = S.status === "wait" ? `상대를 기다리는 중입니다` : S.status === "count" ? `계가 중입니다…` : S.status === "end" ? `<b>${esc(S.result)}</b> · 총 ${moveN}수${S.closeAt ? ` · <span id="r-close"></span>` : ""}` : `<b>${colName(b.turn)} 차례</b> · ${moveN + 1}수째${last !== undefined ? ` · 직전 ${COORD(last, S.size)}` : ""}${mc ? (b.turn === mc ? ` · <span class="gold-t">내 차례</span>` : "") : ` · 관전 중`}`;
   const rq = $("#r-req"), q = S.req; let rh = "";
   if (q && (S.status === "play" || S.status === "end")) { const what = q.type === "undo" ? "한 수 물리기" : q.type === "score" ? "계가" : "흑백 바꿔 한 판 더"; const nick = S.p[q.from] ? S.p[q.from].u.nick : colName(q.from);
     if (mc && mc !== q.from) rh = `<div class="req"><p><b>${esc(nick)}</b>님이 <b>${what}</b>를 요청했습니다.</p><div><button class="btn gold sm" id="q-ok">허락하기</button><button class="btn line sm" id="q-no">거절</button></div></div>`;
@@ -535,6 +549,7 @@ function renderRoom() {
 }
 const fmtClock = st => st.lost ? "시간 초과" : st.byo ? `초읽기 ${Math.ceil(st.left / 1000)}초 · ${st.n}회` : `${Math.floor(st.left / 60000)}:${z2(Math.floor(st.left / 1000) % 60)}`;
 function tickClocks() {
+  const rc = $("#r-close"); if (rc && cur && cur.S && cur.S.closeAt) { const left = Math.max(0, cur.S.closeAt - now()); rc.textContent = `${Math.floor(left / 60000)}:${z2(Math.floor(left / 1000) % 60)} 뒤 방이 닫힙니다`; }
   if (!cur || !cur.S || !cur.S.cl || !cur.b) return; const S = cur.S, live = S.status === "play", el = live ? (H && H.rid === S.rid ? now() - H.t0 : S.el + now() - cur.recvAt) : 0, turn = cur.b.turn;
   for (const c of [1, 2]) { const e = $("#clk-" + c); if (!e) continue; const st = clockOf(S.cl, S.tc, c, live && turn === c ? el : 0); e.textContent = "⏱ " + fmtClock(st); e.classList.toggle("warn", live && turn === c && (st.byo ? st.left < 10000 : st.left < 60000)); }
 }
@@ -566,8 +581,9 @@ function kiboView(tab) {
     <div id="k-list" class="k-list"></div></section>`;
   $$("#k-tabs a").forEach(a => a.classList.toggle("on", a.dataset.t === kiboTab));
   $("#k-q").oninput = e => { kiboQ = e.target.value; renderKiboList(); };
-  $("#k-file").onchange = async e => { const f = e.target.files[0]; if (!f) return; if (f.size > 200000) return toast("파일이 너무 큽니다."); const r = parseSGF(await f.text()); if (!r.moves.length || !fromMoves(r.size, r.moves)) return toast("읽을 수 없는 SGF입니다 (주 수순만 지원)."); const rec = { id: "sgf-" + rid8(), size: r.size, komi: r.komi, m: packMoves(r.moves), pb: r.pb.slice(0, 40), pw: r.pw.slice(0, 40), result: r.result.slice(0, 40), title: (r.title || f.name.replace(/\.sgf$/i, "")).slice(0, 40), date: now(), mine: 0, imported: 1, owner: me ? me.key : undefined, pub: 0 }; games.unshift(rec); saveGames(); toast("기보를 불러왔습니다."); location.hash = `#/kibo/mine/${encodeURIComponent(rec.id)}`; };
+  $("#k-file").onchange = async e => { const f = e.target.files[0]; if (!f) return; if (f.size > 200000) return toast("파일이 너무 큽니다."); const r = parseSGF(await f.text()); if (!r.moves.length || !fromMoves(r.size, r.moves)) return toast("읽을 수 없는 SGF입니다 (주 수순만 지원)."); const rec = { id: "sgf-" + rid8(), size: r.size, komi: r.komi, m: packMoves(r.moves), pb: r.pb.slice(0, 40), pw: r.pw.slice(0, 40), result: r.result.slice(0, 40), title: (r.title || f.name.replace(/\.sgf$/i, "")).slice(0, 40), date: now(), mine: 0, imported: 1, owner: me ? me.key : undefined, pub: 0 }; games.unshift(rec); recAdd(rec); toast(cloud && !me ? "기보를 불러왔습니다. 로그인하면 사이트에 저장됩니다." : "기보를 불러왔습니다."); location.hash = `#/kibo/mine/${encodeURIComponent(rec.id)}`; };
   renderKiboList();
+  if (cloud && kiboTab === "pub") { $("#k-list").innerHTML = `<div class="loading-room"><div class="spin"></div></div>`; cloud.listPub().then(l => { pubs = l.filter(okRec); renderKiboList(); }).catch(e => { cloudErr(e); renderKiboList(); }); }
 }
 function kiboRows() {
   const q = kiboQ.trim().toLowerCase(), hit = r => !q || [r.title, r.pb, r.pw, r.byNick, r.by].some(v => v && String(v).toLowerCase().includes(q));
@@ -588,8 +604,9 @@ function renderKiboList() {
   $$("canvas[data-k]", box).forEach(c => io.observe(c));
 }
 function findRec(src, id) { if (src === "famous") return FAMOUS.find(f => f.id === id); if (src === "pub") return pubs.find(p => p.id === id); return games.find(g => g.id === id); }
-function viewerView(src, id) {
-  page = "viewer"; const r = findRec(src, id);
+async function viewerView(src, id) {
+  page = "viewer"; let r = findRec(src, id);
+  if (!r && cloud && src !== "famous") { view.innerHTML = `<div class="loading-room"><div class="spin"></div><p>기보를 불러오는 중입니다…</p></div>`; try { r = src === "pub" ? await cloud.getPub(id) : me ? await cloud.getMine(me.key, id) : null; } catch (e) { cloudErr(e); } if (page !== "viewer") return; }
   if (!r) { view.innerHTML = `<div class="empty wide"><p>기보를 찾을 수 없습니다.</p><a class="btn gold" href="#/kibo">기보실로</a></div>`; return; }
   const main = unpackMoves(r.m), size = r.size; let idx = main.length, vari = null; // vari: { at, moves:[] }
   const isMine = src === "mine" && (!r.owner || (me && r.owner === me.key));
@@ -612,7 +629,7 @@ function viewerView(src, id) {
   const cv = $("#v-cv"), rng = $("#v-rng"); let playT = 0;
   const seq = () => vari ? main.slice(0, vari.at).concat(vari.moves) : main.slice(0, idx);
   const draw = () => {
-    const ms = seq(), b = fromMoves(size, ms) || new Board(size), nums = settings.numbers ? new Map(ms.map((m, i) => m ? [b.pos(m[0], m[1]), i + 1] : null).filter(Boolean)) : null;
+    if (!document.body.contains(cv)) return; const ms = seq(), b = fromMoves(size, ms) || new Board(size), nums = settings.numbers ? new Map(ms.map((m, i) => m ? [b.pos(m[0], m[1]), i + 1] : null).filter(Boolean)) : null;
     geo = paintBoard(cv, b, { coords: settings.coords, numbers: nums }); $("#v-cb").textContent = b.cap[1]; $("#v-cw").textContent = b.cap[2];
     const last = ms[ms.length - 1];
     $("#v-st").innerHTML = vari ? `<b>변화도</b> · ${vari.at}수 다음에서 ${vari.moves.length}수 <button class="btn ghost sm" id="v-back">원래 수순으로</button>` : `${idx}수 / ${main.length}수${idx ? ` · ${idx % 2 ? "흑" : "백"} ${COORD(last, size)}` : ""}${idx === main.length && r.result ? ` · <b>${esc(r.result)}</b>` : ""}`;
@@ -635,13 +652,13 @@ function viewerView(src, id) {
   $("#v-png").onclick = () => { const c = document.createElement("canvas"); c.style.cssText = "position:fixed;left:-9999px;width:900px;height:900px"; document.body.appendChild(c); const b = fromMoves(size, seq()); paintBoard(c, b, { coords: true }); const a = document.createElement("a"); a.href = c.toDataURL("image/png"); a.download = fname() + `_${seq().length}수.png`; a.click(); c.remove(); };
   const pubBtn = $("#v-pub"); if (pubBtn) pubBtn.onclick = async () => {
     if (!me) { toast("공개하려면 로그인해 주세요."); location.hash = "#/login"; return; }
-    if (r.pub) { r.pub = 0; saveGames(); const i = pubs.findIndex(p => p.id === r.id && p.bk === me.key); if (i >= 0) pubs.splice(i, 1); savePubs(); A.kb.send({ t: "unpub", id: r.id, bk: me.key }); toast("공개를 취소했습니다."); pubBtn.textContent = "공개하기"; return; }
+    if (r.pub) { recUpd(r, { pub: 0 }); const pid = pubIdOf(r), i = pubs.findIndex(p => p.id === pid && p.bk === me.key); if (i >= 0) pubs.splice(i, 1); savePubs(); if (cloud) cloud.unpublish(pid).catch(cloudErr); else A.kb.send({ t: "unpub", id: pid, bk: me.key }); toast("공개를 취소했습니다."); pubBtn.textContent = "공개하기"; return; }
     if (!(await ask("기보 공개", "이 기보를 공개 기보실에 올릴까요? 지금 접속한 사람들과, 앞으로 만나는 사람들에게 퍼집니다.", "공개하기"))) return;
-    const p = { id: r.id, size: r.size, komi: r.komi ?? 6.5, m: r.m, pb: r.pb, pw: r.pw, br: r.br, wr: r.wr, result: r.result, title: r.title, date: r.date, by: me.id, byNick: me.nick, bk: me.key, ts: now() };
-    r.pub = 1; saveGames(); addPub(p); savePubs(); A.kb.send({ t: "pub", r: p }); toast("기보를 공개했습니다."); pubBtn.textContent = "공개 취소";
+    const p = { id: pubIdOf(r), size: r.size, komi: r.komi ?? 6.5, m: r.m, pb: r.pb, pw: r.pw, br: r.br, wr: r.wr, result: r.result, title: r.title, date: r.date, by: me.id, byNick: me.nick, bk: me.key, ts: now() };
+    recUpd(r, { pub: 1 }); addPub(p); savePubs(); if (cloud) cloud.publish(p).catch(cloudErr); else A.kb.send({ t: "pub", r: p }); toast("기보를 공개했습니다."); pubBtn.textContent = "공개 취소";
   };
-  const del = $("#v-del"); if (del) del.onclick = async () => { if (!(await ask("기보 삭제", "이 기보를 지울까요? 되돌릴 수 없습니다.", "삭제", true))) return; games = games.filter(g => g !== r); saveGames(); toast("기보를 지웠습니다."); location.hash = "#/kibo"; };
-  const keep = $("#v-keep"); if (keep) keep.onclick = () => { if (games.some(g => g.id === r.id && g.owner === (me ? me.key : undefined))) return toast("이미 내 기보에 있습니다."); games.unshift({ id: r.id, size: r.size, komi: r.komi ?? 6.5, m: r.m, pb: r.pb, pw: r.pw, br: r.br, wr: r.wr, result: r.result, title: r.title, date: now(), mine: 0, imported: 1, owner: me ? me.key : undefined, pub: 0 }); saveGames(); toast("내 기보에 담았습니다."); };
+  const del = $("#v-del"); if (del) del.onclick = async () => { if (!(await ask("기보 삭제", "이 기보를 지울까요? 되돌릴 수 없습니다.", "삭제", true))) return; if (r.pub && me) { const pid = pubIdOf(r); pubs = pubs.filter(p => !(p.id === pid && p.bk === me.key)); savePubs(); if (cloud) cloud.unpublish(pid).catch(() => {}); } recDel(r); toast("기보를 지웠습니다."); location.hash = "#/kibo"; };
+  const keep = $("#v-keep"); if (keep) keep.onclick = () => { if (games.some(g => g.id === r.id && g.owner === (me ? me.key : undefined))) return toast("이미 내 기보에 있습니다."); games.unshift({ id: r.id, size: r.size, komi: r.komi ?? 6.5, m: r.m, pb: r.pb, pw: r.pw, br: r.br, wr: r.wr, result: r.result, title: r.title, date: now(), mine: 0, imported: 1, owner: me ? me.key : undefined, pub: 0 }); recAdd(games[0]); toast("내 기보에 담았습니다."); };
   new ResizeObserver(draw).observe(cv); draw();
 }
 
@@ -663,26 +680,30 @@ function loginView(tab, next) {
       <label class="fld"><span>아이디</span><input name="id" required maxlength="16" autocomplete="username"></label>
       <label class="fld"><span>비밀번호</span><input name="pw" type="password" required maxlength="40" autocomplete="current-password"></label>
       <p class="m-err" hidden></p><button class="btn gold lg block">로그인</button>
-      ${accounts.length ? `<div class="saved-acc"><p class="muted small">이 기기의 계정</p>${accounts.map(a => `<button type="button" class="who" data-id="${esc(a.id)}">${avatar(a, 30)}<span><b>${esc(a.nick)}</b><small>@${esc(a.id)}</small></span></button>`).join("")}</div>` : ""}</form>`}
-    <div class="auth-foot"><p class="muted small">계정과 기보는 서버가 아니라 <b>이 기기의 브라우저</b>에 저장됩니다. 다른 기기에서 쓰려면 프로필에서 계정 파일을 내려받아 그 기기에서 불러오세요.</p><label class="btn ghost sm file-btn">계정 파일 불러오기<input type="file" id="acc-file" accept=".json,application/json" hidden></label></div></div></section>`;
+      ${!cloud && accounts.length ? `<div class="saved-acc"><p class="muted small">이 기기의 계정</p>${accounts.map(a => `<button type="button" class="who" data-id="${esc(a.id)}">${avatar(a, 30)}<span><b>${esc(a.nick)}</b><small>@${esc(a.id)}</small></span></button>`).join("")}</div>` : ""}</form>`}
+    <div class="auth-foot">${cloud ? `<p class="muted small">무량 회원은 <b>어느 기기에서나</b> 같은 아이디와 비밀번호로 로그인할 수 있고, 기보와 전적은 사이트에 저장됩니다.</p>` : `<p class="muted small">계정과 기보는 서버가 아니라 <b>이 기기의 브라우저</b>에 저장됩니다. 다른 기기에서 쓰려면 프로필에서 계정 파일을 내려받아 그 기기에서 불러오세요.</p><label class="btn ghost sm file-btn">계정 파일 불러오기<input type="file" id="acc-file" accept=".json,application/json" hidden></label>`}</div></div></section>`;
   const cvA = $("#auth-cv"); const f = FAMOUS[Math.floor(Math.random() * FAMOUS.length)], ms = unpackMoves(f.m); const drawA = () => { const b = fromMoves(f.size, ms.slice(0, Math.min(120, ms.length))); if (b) paintBoard(cvA, b, { coords: false }); }; new ResizeObserver(drawA).observe(cvA);
   const err = (fm, t) => { const p = $(".m-err", fm); p.textContent = t; p.hidden = !t; };
   const goNext = () => { location.hash = next ? "#" + next : "#/"; };
   const fin = $("#f-in"); if (fin) {
     $$(".saved-acc [data-id]").forEach(b => b.onclick = () => { $("[name=id]", fin).value = b.dataset.id; $("[name=pw]", fin).focus(); });
-    fin.onsubmit = async e => { e.preventDefault(); const v = Object.fromEntries(new FormData(fin)), a = accounts.find(x => x.id === v.id.trim().toLowerCase());
+    fin.onsubmit = async e => { e.preventDefault(); const v = Object.fromEntries(new FormData(fin));
+      if (cloud) { const bt = $("button", fin); bt.disabled = true; err(fin, ""); try { const p = fromCloud(await cloud.login(v.id.trim().toLowerCase(), v.pw)); await loadMine(p); setMe(p); toast(`${p.nick}님, 어서 오세요.`); goNext(); } catch (x) { err(fin, x.message); } bt.disabled = false; return; }
+      const a = accounts.find(x => x.id === v.id.trim().toLowerCase());
       if (!a) return err(fin, "이 기기에 없는 아이디입니다. 다른 기기에서 만든 계정이면 계정 파일을 불러오세요.");
       if ((await sha(a.salt + v.pw)) !== a.pw) return err(fin, "비밀번호가 맞지 않습니다.");
       setMe(a); toast(`${a.nick}님, 어서 오세요.`); goNext(); };
   }
   const fup = $("#f-up"); if (fup) {
-    const idIn = $("[name=id]", fup); idIn.oninput = () => { const v = idIn.value.trim().toLowerCase(), h = $("#id-hint"); if (!v) { h.textContent = "영문 소문자·숫자·밑줄(_)만 쓸 수 있어요."; h.className = "hint"; return; } const m = idCheck(v); h.textContent = m || "쓸 수 있는 아이디입니다."; h.className = "hint " + (m ? "bad" : "good"); };
+    const idIn = $("[name=id]", fup); let idT = 0; idIn.oninput = () => { const v = idIn.value.trim().toLowerCase(), h = $("#id-hint"); if (!v) { h.textContent = "영문 소문자·숫자·밑줄(_)만 쓸 수 있어요."; h.className = "hint"; return; } const m = idCheck(v); h.textContent = m || (cloud ? "확인 중…" : "쓸 수 있는 아이디입니다."); h.className = "hint " + (m ? "bad" : cloud ? "" : "good");
+      if (!m && cloud) { clearTimeout(idT); idT = setTimeout(() => cloud.idTaken(v).then(t => { if (idIn.value.trim().toLowerCase() !== v) return; h.textContent = t ? "이미 쓰는 아이디입니다." : "쓸 수 있는 아이디입니다."; h.className = "hint " + (t ? "bad" : "good"); }).catch(() => { h.textContent = ""; }), 400); } };
     fup.onsubmit = async e => { e.preventDefault(); const v = Object.fromEntries(new FormData(fup)), id = v.id.trim().toLowerCase();
       const m = idCheck(id); if (m) return err(fup, m); if (!nickOK(v.nick)) return err(fup, "닉네임은 2~12자로 적어 주세요."); if (v.pw.length < 6) return err(fup, "비밀번호는 6자 이상이어야 합니다."); if (v.pw !== v.pw2) return err(fup, "비밀번호 확인이 맞지 않습니다.");
+      if (cloud) { const bt = $("button.block", fup); bt.disabled = true; err(fup, ""); try { const p = fromCloud(await cloud.signup({ id, nick: v.nick.trim(), pw: v.pw, rank: +v.rank })); games = []; setMe(p); toast("가입을 마쳤습니다. 프로필을 꾸며 보세요."); location.hash = next ? "#" + next : "#/profile"; } catch (x) { err(fup, x.message); } bt.disabled = false; return; }
       const salt = rid8() + rid8(), a = { key: "k" + rid8() + rid8(), id, nick: v.nick.trim(), pw: await sha(salt + v.pw), salt, rank: +v.rank, bio: "", av: { k: "stone", c: "black" }, rec: { w: 0, l: 0 }, created: now(), idAt: now() };
       accounts.push(a); saveAccounts(); setMe(a); toast("가입을 마쳤습니다. 프로필을 꾸며 보세요."); location.hash = next ? "#" + next : "#/profile"; };
   }
-  $("#acc-file").onchange = async e => { const file = e.target.files[0]; if (!file) return; try { const d = JSON.parse(await file.text()); if (d.kind !== "muryang-account" || !d.account || !ID_RE.test(d.account.id)) throw 0; const a = d.account; if (!okAv(a.av) || !nickOK(a.nick) || typeof a.pw !== "string" || typeof a.salt !== "string") throw 0;
+  if ($("#acc-file")) $("#acc-file").onchange = async e => { const file = e.target.files[0]; if (!file) return; try { const d = JSON.parse(await file.text()); if (d.kind !== "muryang-account" || !d.account || !ID_RE.test(d.account.id)) throw 0; const a = d.account; if (!okAv(a.av) || !nickOK(a.nick) || typeof a.pw !== "string" || typeof a.salt !== "string") throw 0;
     const old = accounts.findIndex(x => x.key === a.key || x.id === a.id); if (old >= 0) { if (!(await ask("계정 덮어쓰기", `이 기기에 @${a.id} 계정이 이미 있습니다. 불러온 파일로 바꿀까요?`, "바꾸기"))) return; accounts.splice(old, 1); }
     accounts.push({ ...a, rec: a.rec || { w: 0, l: 0 } }); saveAccounts(); let n = 0; if (Array.isArray(d.games)) for (const g of d.games) if (okRec(g) && !games.some(x => x.id === g.id && x.owner === a.key)) { games.push({ ...g, owner: a.key }); n++; } games.sort((x, y) => (y.date || 0) - (x.date || 0)); saveGames();
     toast(`@${a.id} 계정과 기보 ${n}개를 불러왔습니다. 비밀번호로 로그인하세요.`); location.hash = "#/login"; route(); } catch (er) { toast("계정 파일을 읽지 못했습니다.", "warn"); } };
@@ -717,29 +738,31 @@ function profileView() {
         <div class="sc-nums"><div><b>${w + l}</b><span>대국</span></div><div><b>${w}</b><span>승</span></div><div><b>${l}</b><span>패</span></div><div><b>${rate}%</b><span>승률</span></div></div><p class="muted small">사람과 둔 대국만 셉니다.</p></div>
       <div class="panel"><div class="panel-h"><h2>최근 대국</h2><a class="muted small" href="#/kibo">전체 →</a></div><div class="recent">${mine.slice(0, 6).map(g => `<a href="#/kibo/mine/${encodeURIComponent(g.id)}"><span class="res ${g.win === g.myColor ? "w" : "l"}">${g.win === g.myColor ? "승" : "패"}</span><span>${esc(g.myColor === 1 ? g.pw : g.pb)} <small>${esc(g.myColor === 1 ? g.wr || "" : g.br || "")}</small></span><small>${fmtDay(g.date)}</small></a>`).join("") || `<p class="muted">아직 사람과 둔 대국이 없습니다.</p>`}</div></div>
       <div class="panel acc-panel"><div class="panel-h"><h2>계정</h2></div>
-        <button class="btn line block" id="pw-ch">비밀번호 바꾸기</button><button class="btn line block" id="acc-exp">계정 파일 내려받기 <small>(다른 기기로 옮기기)</small></button><button class="btn ghost block" id="acc-out">로그아웃</button><button class="btn danger-line block" id="acc-del">계정 지우기</button></div>
+        <button class="btn line block" id="pw-ch">비밀번호 바꾸기</button>${cloud ? "" : `<button class="btn line block" id="acc-exp">계정 파일 내려받기 <small>(다른 기기로 옮기기)</small></button>`}<button class="btn ghost block" id="acc-out">로그아웃</button><button class="btn danger-line block" id="acc-del">계정 지우기</button></div>
     </div></section>`;
   let av = { ...me.av };
   const setAv = a => { av = a; $(".av-edit > .av").outerHTML = avatar({ ...me, av }, 96); $$(".av-sw").forEach(b => b.classList.toggle("on", a.k === "stone" ? b.dataset.c === a.c : b.classList.contains("up"))); };
   $$(".av-sw[data-c]").forEach(b => b.onclick = () => setAv({ k: "stone", c: b.dataset.c }));
   $("#av-file").onchange = e => { const f = e.target.files[0]; if (!f) return; const img = new Image(); img.onload = () => { const c = document.createElement("canvas"); c.width = c.height = 96; const x = c.getContext("2d"), s = Math.min(img.width, img.height); x.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 96, 96); let q = .85, src = c.toDataURL("image/jpeg", q); while (src.length > 22000 && q > .3) { q -= .15; src = c.toDataURL("image/jpeg", q); } URL.revokeObjectURL(img.src); setAv({ k: "img", src }); }; img.onerror = () => toast("그림을 읽지 못했습니다."); img.src = URL.createObjectURL(f); };
   const idIn = $("[name=id]", $("#pf")); idIn.oninput = () => { const v = idIn.value.trim().toLowerCase(), m = v === me.id ? "" : idCheck(v, me.key), h = $("#pid-hint"); h.textContent = v === me.id ? "지금 아이디입니다." : m || "쓸 수 있는 아이디입니다."; h.className = "hint " + (v === me.id ? "" : m ? "bad" : "good"); };
-  $("#pf").onsubmit = e => { e.preventDefault(); const fm = e.target, v = Object.fromEntries(new FormData(fm)), er = t => { const p = $(".m-err", fm); p.textContent = t; p.hidden = !t; };
+  $("#pf").onsubmit = async e => { e.preventDefault(); const fm = e.target, v = Object.fromEntries(new FormData(fm)), er = t => { const p = $(".m-err", fm); p.textContent = t; p.hidden = !t; };
     if (!nickOK(v.nick)) return er("닉네임은 2~12자로 적어 주세요.");
-    if (canId && v.id !== undefined) { const id = v.id.trim().toLowerCase(); if (id !== me.id) { const m = idCheck(id, me.key); if (m) return er(m); for (const g of games) if (g.owner === me.key) { if (g.pbId === me.id) g.pbId = id; if (g.pwId === me.id) g.pwId = id; } me.id = id; me.idAt = now(); saveGames(); } }
-    me.nick = v.nick.trim(); me.rank = +v.rank; me.bio = (v.bio || "").trim().slice(0, 80); me.av = av; saveAccounts(); renderChip(); sendPres(); if (H) { for (const c of [1, 2]) if (H.p[c] && H.p[c].pid === selfId) H.p[c].u = pubU(); pushState(); } toast("프로필을 저장했습니다."); profileView(); };
-  $("#pw-ch").onclick = async () => { const v = await modal(`<h3>비밀번호 바꾸기</h3><label class="fld"><span>지금 비밀번호</span><input name="o" type="password" required></label><label class="fld"><span>새 비밀번호</span><input name="n" type="password" required minlength="6"></label><label class="fld"><span>새 비밀번호 확인</span><input name="n2" type="password" required></label><p class="m-err" hidden></p><div class="m-act"><button class="btn ghost" data-x>취소</button><button class="btn gold" type="submit">바꾸기</button></div>`, { validate: async fd => (await sha(me.salt + fd.o)) !== me.pw ? "지금 비밀번호가 맞지 않습니다." : fd.n.length < 6 ? "새 비밀번호는 6자 이상이어야 합니다." : fd.n !== fd.n2 ? "새 비밀번호 확인이 맞지 않습니다." : "" }); if (!v) return; me.salt = rid8() + rid8(); me.pw = await sha(me.salt + v.n); saveAccounts(); toast("비밀번호를 바꿨습니다."); };
-  $("#acc-exp").onclick = () => { const data = { kind: "muryang-account", v: 1, at: now(), account: me, games: games.filter(g => g.owner === me.key) }; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: "application/json" })); a.download = `muryang_${me.id}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); toast("계정 파일을 내려받았습니다. 비밀번호는 해시로만 들어 있어요."); };
+    if (canId && v.id !== undefined) { const id = v.id.trim().toLowerCase(); if (id !== me.id) { const m = idCheck(id, me.key); if (m) return er(m); if (cloud) { try { await cloud.changeId(me.key, me.id, id); } catch (x) { return er(x.message); } } for (const g of games) if (g.owner === me.key) { if (g.pbId === me.id) g.pbId = id; if (g.pwId === me.id) g.pwId = id; } me.id = id; me.idAt = now(); if (!cloud) saveGames(); } }
+    me.nick = v.nick.trim(); me.rank = +v.rank; me.bio = (v.bio || "").trim().slice(0, 80); me.av = av; if (cloud) { try { await cloud.saveProfile(me.key, { nick: me.nick, rank: me.rank, bio: me.bio, av: me.av }); } catch (x) { return er(x.message); } } else saveAccounts(); renderChip(); sendPres(); if (H) { for (const c of [1, 2]) if (H.p[c] && H.p[c].pid === selfId) H.p[c].u = pubU(); pushState(); } toast("프로필을 저장했습니다."); profileView(); };
+  $("#pw-ch").onclick = async () => { const v = await modal(`<h3>비밀번호 바꾸기</h3><label class="fld"><span>지금 비밀번호</span><input name="o" type="password" required></label><label class="fld"><span>새 비밀번호</span><input name="n" type="password" required minlength="6"></label><label class="fld"><span>새 비밀번호 확인</span><input name="n2" type="password" required></label><p class="m-err" hidden></p><div class="m-act"><button class="btn ghost" data-x>취소</button><button class="btn gold" type="submit">바꾸기</button></div>`, { validate: async fd => fd.n.length < 6 ? "새 비밀번호는 6자 이상이어야 합니다." : fd.n !== fd.n2 ? "새 비밀번호 확인이 맞지 않습니다." : cloud ? await cloud.changePw(fd.o, fd.n).then(() => "", x => x.message) : (await sha(me.salt + fd.o)) !== me.pw ? "지금 비밀번호가 맞지 않습니다." : "" }); if (!v) return; if (!cloud) { me.salt = rid8() + rid8(); me.pw = await sha(me.salt + v.n); saveAccounts(); } toast("비밀번호를 바꿨습니다."); };
+  if ($("#acc-exp")) $("#acc-exp").onclick = () => { const data = { kind: "muryang-account", v: 1, at: now(), account: me, games: games.filter(g => g.owner === me.key) }; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: "application/json" })); a.download = `muryang_${me.id}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); toast("계정 파일을 내려받았습니다. 비밀번호는 해시로만 들어 있어요."); };
   $("#acc-out").onclick = logout;
-  $("#acc-del").onclick = async () => { const v = await modal(`<h3>계정 지우기</h3><p class="m-text">@${esc(me.id)} 계정과 이 계정의 기보가 이 기기에서 지워집니다. 되돌릴 수 없습니다.</p><label class="fld"><span>비밀번호</span><input name="pw" type="password" required></label><p class="m-err" hidden></p><div class="m-act"><button class="btn ghost" data-x>취소</button><button class="btn danger" type="submit">지우기</button></div>`, { validate: async fd => (await sha(me.salt + fd.pw)) !== me.pw ? "비밀번호가 맞지 않습니다." : "" }); if (!v) return; const k = me.key; if (H) closeRoom(true); accounts = accounts.filter(a => a.key !== k); games = games.filter(g => g.owner !== k); saveAccounts(); saveGames(); setMe(null); toast("계정을 지웠습니다."); location.hash = "#/"; };
+  $("#acc-del").onclick = async () => { const v = await modal(`<h3>계정 지우기</h3><p class="m-text">@${esc(me.id)} 계정과 이 계정의 기보가 ${cloud ? "사이트에서" : "이 기기에서"} 지워집니다. 되돌릴 수 없습니다.</p><label class="fld"><span>비밀번호</span><input name="pw" type="password" required></label><p class="m-err" hidden></p><div class="m-act"><button class="btn ghost" data-x>취소</button><button class="btn danger" type="submit">지우기</button></div>`, { validate: async fd => cloud ? await cloud.deleteAccount(fd.pw, me.id).then(() => "", x => x.message) : (await sha(me.salt + fd.pw)) !== me.pw ? "비밀번호가 맞지 않습니다." : "" }); if (!v) return; const k = me.key; if (cloud) { if (H) closeRoom(true); games = []; setMe(null); toast("계정을 지웠습니다."); location.hash = "#/"; return; } if (H) closeRoom(true); accounts = accounts.filter(a => a.key !== k); games = games.filter(g => g.owner !== k); saveAccounts(); saveGames(); setMe(null); toast("계정을 지웠습니다."); location.hash = "#/"; };
 }
 let userId = "";
-function userView(id) {
-  page = "user"; userId = id; const p = [...peers.values()].find(x => x.u && x.u.id === id), u = p ? p.u : me && me.id === id ? pubU() : null, theirs = pubs.filter(r => r.by === id);
+const userCache = new Map();
+async function userView(id) {
+  page = "user"; userId = id; const p = [...peers.values()].find(x => x.u && x.u.id === id); let u = p ? p.u : me && me.id === id ? pubU() : null, theirs = pubs.filter(r => r.by === id);
+  if (cloud) { let c = userCache.get(id); if (!c || now() - c.t > 30000) { if (!c) view.innerHTML = `<div class="loading-room"><div class="spin"></div></div>`; try { const [pp, list] = await Promise.all([u ? null : cloud.userById(id), cloud.pubsBy(id)]); c = { t: now(), u: pp ? cleanU({ ...pp, key: pp.key }) : null, list: list.filter(okRec) }; userCache.set(id, c); } catch (e) { c = { t: now(), u: null, list: [] }; } if (page !== "user" || userId !== id) return; } if (!u) u = c.u; theirs = c.list; }
   const at = p && p.at.startsWith("room:") ? p.at.slice(5) : "", r = at ? allRooms().find(x => x.rid === at) : null;
   view.innerHTML = `<section class="user-page">${u ? `<div class="panel user-card">${avatar(u, 110)}<div><h1>${esc(u.nick)}</h1><p class="muted">@${esc(u.id)} · ${esc(rankOf(u))}</p>${u.bio ? `<p class="bio">“${esc(u.bio)}”</p>` : ""}
       <div class="sc-nums"><div><b>${u.w + u.l}</b><span>대국</span></div><div><b>${u.w}</b><span>승</span></div><div><b>${u.l}</b><span>패</span></div><div><b>${u.w + u.l ? Math.round(u.w / (u.w + u.l) * 100) : 0}%</b><span>승률</span></div></div>
-      <p class="online-st">${me && me.id === id ? "나" : `<span class="live-dot"></span>지금 접속 중${r ? ` · 「${esc(r.title)}」 ${r.status === "play" ? "대국 중" : "방에 있음"} <a class="btn line sm" href="#/room/${r.rid}?m=watch">관전</a>` : " · 로비"}`}</p></div></div>`
+      <p class="online-st">${me && me.id === id ? "나" : !p ? "지금 접속해 있지 않습니다" : `<span class="live-dot"></span>지금 접속 중${r ? ` · 「${esc(r.title)}」 ${r.status === "play" ? "대국 중" : "방에 있음"} <a class="btn line sm" href="#/room/${r.rid}?m=watch">관전</a>` : " · 로비"}`}</p></div></div>`
     : `<div class="panel user-card"><span class="av stone" style="--s:110px;--c1:#222;--c2:#555">?</span><div><h1>@${esc(id)}</h1><p class="muted">지금 접속해 있지 않아 프로필을 불러올 수 없습니다.</p></div></div>`}
     <div class="panel"><div class="panel-h"><h2>@${esc(id)}님이 공개한 기보</h2></div><div class="k-list">${theirs.length ? theirs.map(x => `<a class="krow" href="#/kibo/pub/${encodeURIComponent(x.id)}"><span class="k-main"><b>${esc(x.title || `${x.pb} vs ${x.pw}`)}</b><small>${esc(x.pb)} vs ${esc(x.pw)}</small></span><span class="k-res">${esc(x.result || "")}<small>${x.size}줄 · ${x.m.length / 2}수</small></span><span class="k-date">${fmtDay(x.date)}</span></a>`).join("") : `<p class="muted pad">공개한 기보가 없습니다.</p>`}</div></div></section>`;
 }
@@ -748,4 +771,19 @@ function userView(id) {
 // 시작
 // =====================================================================
 addEventListener("beforeunload", e => { if (H || (cur && cur.S && myColorIn(cur.S) && cur.S.status === "play")) { if (H) A.lob.send({ t: "close", rid: H.rid }); if (cur && !H) leaveRoom(true); e.preventDefault(); e.returnValue = ""; } });
-renderChip(); setNet("connecting"); route(); connect();
+async function loadMine(p) { games = []; if (!cloud || !p) return; try { games = (await cloud.listMine(p.key)).filter(okRec); } catch (e) { cloudErr(e); } }
+async function start() {
+  renderChip(); setNet("connecting");
+  const cfg = firebaseConfig || {};
+  if (cfg.apiKey && cfg.projectId) {
+    view.innerHTML = `<div class="loading-room"><div class="spin"></div><p>무량에 들어가는 중입니다…</p></div>`;
+    try {
+      cloud = await initCloud(cfg); me = null; games = []; pubs = []; let first = true;
+      cloud.onUser = async p => { const m = fromCloud(p); if (!first && ((m && me && m.key === me.key) || (!m && !me))) return; await loadMine(m); setMe(m); if (!first) route(); };
+      await Promise.race([cloud.ready, new Promise(r => setTimeout(r, 8000))]); first = false;
+      $(".foot-r").textContent = "회원 · 기보는 사이트에 저장됩니다 · 대국은 접속한 사람끼리 직접 연결됩니다";
+    } catch (e) { console.warn(e); cloud = null; me = accounts.find(a => a.key === load(LS.ses, null)) || null; games = load(LS.games, []); pubs = load(LS.pub, []); toast("사이트 저장소(Firebase)에 연결하지 못해 이 기기 저장 모드로 엽니다.", "warn"); }
+  }
+  renderChip(); route(); connect();
+}
+start();

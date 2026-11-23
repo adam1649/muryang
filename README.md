@@ -16,16 +16,34 @@
 - **로비**: 접속자 목록(누르면 그 사람의 프로필과 공개 기보), 로비 채팅
 - **계정 옮기기**: 프로필에서 계정 파일(.json, 비밀번호는 해시) 내려받기 → 다른 기기의 로그인 화면에서 불러오기
 
-## 꼭 알아 두기 (서버가 없는 구조)
-- 계정 · 기보는 **이 기기의 브라우저(localStorage)** 에 저장됩니다. 브라우저 데이터를 지우면 함께 지워집니다.
-- 대국 · 관전 · 채팅 · 기보 공개는 접속한 사람끼리 **직접 연결**(Trystero P2P)해 주고받습니다.
-  - 방은 방을 연 사람의 브라우저가 붙잡고 있으므로, 방장이 창을 닫으면 방이 닫힙니다.
-  - 아이디가 겹치지 않는지는 이 기기와 지금 접속한 사람, 공개 기보 기준으로만 확인할 수 있습니다.
-  - 공개 기보는 접속한 사람들끼리 서로 나눠 가지는 방식이라, 모두에게 똑같이 보이지 않을 수 있습니다.
-- 모두가 같은 계정·순위·기보를 보게 하려면 나중에 Firebase · Supabase 같은 저장소를 붙여야 합니다.
+## v2에서 달라진 것
+- 첫 화면 글귀: **흑과 백이 그리는 무한의 세계.**
+- 대국이 끝나면 **5분 뒤 방이 자동으로 닫힙니다**(남은 시간 표시). 그 사이 「다시 두기」를 하면 방이 유지됩니다.
+- **Firebase 연결**: `src/firebase-config.js`를 채우면 회원가입·로그인이 어느 기기에서나 되고, 프로필·전적·내 기보·공개 기보가 사이트에 저장됩니다. 비워 두면 예전처럼 이 기기 브라우저에 저장합니다.
 
-## 올리기
-저장소 맨 위에 `index.html`, `style.css`, `src/` 를 두고 GitHub Pages(Deploy from a branch · main · /(root))를 켜면 됩니다.
+## Firebase 연결하기
+1. https://console.firebase.google.com → **프로젝트 추가** (이름 예: muryang)
+2. **빌드 → Authentication → 시작하기 → 이메일/비밀번호** 사용 설정
+   - 회원은 아이디로 가입·로그인합니다. 이메일은 필요 없고, 내부용 주소가 자동으로 만들어집니다.
+3. **빌드 → Firestore Database → 데이터베이스 만들기** (위치 `asia-northeast3 (서울)`, 프로덕션 모드)
+4. Firestore **규칙** 탭에 `firestore.rules` 내용을 붙여 넣고 **게시**
+5. **프로젝트 설정(톱니바퀴) → 내 앱 → 웹(</>)** 앱 등록 → 나오는 `firebaseConfig` 값을 `src/firebase-config.js`에 붙여 넣기
+6. **Authentication → 설정 → 승인된 도메인**에 사이트 주소 추가 (예: `adam1649.github.io`)
+7. 저장소에 다시 올리면 끝 (GitHub Pages 그대로 써도 됩니다)
+
+### Firebase Hosting으로 올리고 싶다면 (선택)
+```
+npm install -g firebase-tools
+firebase login
+firebase use --add        (만든 프로젝트 선택)
+firebase deploy           (사이트 + Firestore 규칙이 같이 올라갑니다)
+```
+주소는 `https://<프로젝트ID>.web.app` 이 됩니다.
+
+## 알아 두기
+- 대국 · 관전 · 채팅은 지금도 접속한 사람끼리 **직접 연결**(Trystero P2P)해 주고받습니다. 방은 방을 연 사람의 브라우저가 붙잡고 있어, 방장이 창을 닫으면 방이 닫힙니다.
+- Firebase를 연결하지 않으면 계정 · 기보는 이 기기의 브라우저에만 저장됩니다(프로필의 계정 파일로 다른 기기에 옮길 수 있음).
+- 전적(승 · 패)은 각자의 브라우저가 기록합니다.
 
 ## 파일
 - `index.html` · `style.css` — 화면
@@ -34,3 +52,6 @@
 - `src/worker.js` — 인공지능 · 계가를 따로 계산(화면이 멈추지 않게)
 - `src/board.js` — 바둑판 그리기 · SGF 읽기/쓰기
 - `src/famous.js` — 명국 기보 50국
+- `src/cloud.js` — Firebase 회원 · 기보 저장
+- `src/firebase-config.js` — Firebase 설정값 (여기를 채우세요)
+- `firestore.rules` — Firestore 보안 규칙 · `firebase.json` — Firebase Hosting 설정(선택)

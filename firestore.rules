@@ -1,0 +1,41 @@
+rules_version = '2';
+// 무량 · Firestore 보안 규칙
+// Firebase 콘솔 → Firestore Database → 규칙 탭에 이 내용을 그대로 붙여 넣고 「게시」를 누르세요.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 아이디 → 회원 연결 (아이디 중복 확인 · 아이디로 로그인)
+    match /ids/{id} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid
+        && id.matches('^[a-z][a-z0-9_]{3,15}$');
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+    }
+
+    // 회원 프로필 (누구나 볼 수 있고, 본인만 고칠 수 있음)
+    match /users/{uid} {
+      allow read: if true;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.nick is string && request.resource.data.nick.size() <= 12
+        && request.resource.data.id is string
+        && request.resource.size() < 60000;
+      allow delete: if request.auth != null && request.auth.uid == uid;
+
+      // 내 기보 (본인만)
+      match /games/{gid} {
+        allow read, delete: if request.auth != null && request.auth.uid == uid;
+        allow create, update: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.m is string && request.resource.data.m.size() <= 1800;
+      }
+    }
+
+    // 공개 기보 (누구나 볼 수 있고, 올린 사람만 내릴 수 있음)
+    match /pub/{pid} {
+      allow read: if true;
+      allow create: if request.auth != null && request.resource.data.bk == request.auth.uid
+        && request.resource.data.m is string && request.resource.data.m.size() <= 1800;
+      allow update, delete: if request.auth != null && resource.data.bk == request.auth.uid;
+    }
+  }
+}
