@@ -688,7 +688,13 @@ function loginView(tab, next) {
   const fin = $("#f-in"); if (fin) {
     $$(".saved-acc [data-id]").forEach(b => b.onclick = () => { $("[name=id]", fin).value = b.dataset.id; $("[name=pw]", fin).focus(); });
     fin.onsubmit = async e => { e.preventDefault(); const v = Object.fromEntries(new FormData(fin));
-      if (cloud) { const bt = $("button", fin); bt.disabled = true; err(fin, ""); try { const p = fromCloud(await cloud.login(v.id.trim().toLowerCase(), v.pw)); await loadMine(p); setMe(p); toast(`${p.nick}님, 어서 오세요.`); goNext(); } catch (x) { err(fin, x.message); } bt.disabled = false; return; }
+      if (cloud) { const bt = $("button", fin); bt.disabled = true; err(fin, ""); const id = v.id.trim().toLowerCase();
+        try { const p = fromCloud(await cloud.login(id, v.pw)); await loadMine(p); setMe(p); toast(`${p.nick}님, 어서 오세요.`); goNext(); }
+        catch (x) {
+          const old = x.message === "없는 아이디입니다." && accounts.find(a => a.id === id);
+          if (old && (await sha(old.salt + v.pw)) === old.pw) { try { await migrate(old, v.pw); goNext(); } catch (y) { err(fin, y.message); } }
+          else err(fin, old ? "이 기기에 예전 계정이 있지만 비밀번호가 맞지 않습니다." : x.message);
+        } bt.disabled = false; return; }
       const a = accounts.find(x => x.id === v.id.trim().toLowerCase());
       if (!a) return err(fin, "이 기기에 없는 아이디입니다. 다른 기기에서 만든 계정이면 계정 파일을 불러오세요.");
       if ((await sha(a.salt + v.pw)) !== a.pw) return err(fin, "비밀번호가 맞지 않습니다.");
@@ -708,12 +714,23 @@ function loginView(tab, next) {
     accounts.push({ ...a, rec: a.rec || { w: 0, l: 0 } }); saveAccounts(); let n = 0; if (Array.isArray(d.games)) for (const g of d.games) if (okRec(g) && !games.some(x => x.id === g.id && x.owner === a.key)) { games.push({ ...g, owner: a.key }); n++; } games.sort((x, y) => (y.date || 0) - (x.date || 0)); saveGames();
     toast(`@${a.id} 계정과 기보 ${n}개를 불러왔습니다. 비밀번호로 로그인하세요.`); location.hash = "#/login"; route(); } catch (er) { toast("계정 파일을 읽지 못했습니다.", "warn"); } };
 }
+// Firebase 연결 전에 이 기기에서 만든 계정을 사이트 계정으로 옮긴다 (같은 아이디 · 비밀번호 · 기보 · 전적)
+async function migrate(old, pw) {
+  const p = fromCloud(await cloud.signup({ id: old.id, nick: old.nick, pw, rank: old.rank }));
+  const rec = old.rec || { w: 0, l: 0 }; p.bio = old.bio || ""; p.av = okAv(old.av) ? old.av : p.av; p.rec = { w: rec.w | 0, l: rec.l | 0 };
+  try { await cloud.saveProfile(p.key, { nick: p.nick, rank: p.rank, bio: p.bio, av: p.av, w: p.rec.w, l: p.rec.l }); } catch (e) { console.warn(e); }
+  const mine = load(LS.games, []).filter(g => g.owner === old.key && okRec(g)); let n = 0;
+  for (const g of mine) { try { await cloud.addRec(p.key, { ...g, owner: undefined, pub: 0 }); n++; } catch (e) { console.warn(e); } }
+  accounts = accounts.filter(a => a.key !== old.key); saveAccounts();
+  games = mine.map(g => ({ ...g, owner: p.key, pub: 0 })).sort((a, b) => (b.date || 0) - (a.date || 0)); setMe(p);
+  toast(`예전 @${old.id} 계정을 사이트 계정으로 옮겼습니다${n ? ` (기보 ${n}개)` : ""}. 이제 어느 기기에서나 로그인됩니다.`);
+}
 function idCheck(id, selfKey) {
   if (!ID_RE.test(id)) return "아이디는 영문 소문자로 시작하고, 영문 소문자·숫자·밑줄로 4~16자여야 합니다.";
   if (["muryang", "muryang_ai", "admin", "guest", "system"].includes(id)) return "쓸 수 없는 아이디입니다.";
-  if (accounts.some(a => a.id === id && a.key !== selfKey)) return "이 기기에 이미 있는 아이디입니다.";
+  if (!cloud && accounts.some(a => a.id === id && a.key !== selfKey)) return "이 기기에 이미 있는 아이디입니다.";
   for (const p of peers.values()) if (p.u && p.u.id === id && p.u.key !== selfKey) return "지금 접속한 다른 회원이 쓰는 아이디입니다.";
-  for (const p of pubs) if (p.by === id && p.bk !== selfKey) return "공개 기보에 이미 쓰인 아이디입니다.";
+  if (!cloud) for (const p of pubs) if (p.by === id && p.bk !== selfKey) return "공개 기보에 이미 쓰인 아이디입니다.";
   return "";
 }
 
